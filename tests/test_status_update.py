@@ -1,15 +1,17 @@
 """Unit tests for herald — all offline, no API keys required."""
 
 import argparse
+import asyncio
 import base64
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from herald.app import ReviewResult, edit_in_editor, extract_color
+from herald.app import ReviewResult, ReviewScreen, edit_in_editor, extract_color
 from herald.config import UserPrefs, find_scripts_dir, find_skills_dir, load_prefs
 from herald.gather import (
     _field_to_text,
@@ -17,7 +19,7 @@ from herald.gather import (
     is_significant,
     load_current_statuses,
 )
-from herald.jira import get_jira_auth
+from herald.jira import _normalized_adf, get_jira_auth, update_jira_status
 from herald.llm import TokenUsage, build_system_prompt
 
 
@@ -142,6 +144,134 @@ def test_get_jira_auth_raises_when_env_missing():
     with patch.dict(os.environ, {"JIRA_USERNAME": "", "JIRA_API_TOKEN": ""}):
         with pytest.raises(ValueError, match="JIRA_USERNAME and JIRA_API_TOKEN"):
             get_jira_auth()
+
+
+class _Response:
+    def __init__(self, status, data=None, text=""):
+        self.status = status
+        self.data = data
+        self._text = text
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def text(self):
+        return self._text
+
+    async def json(self):
+        return self.data
+
+
+class _Session:
+    def __init__(self, put_status=204, get_status=200, field=None, error=""):
+        self.put_status = put_status
+        self.get_status = get_status
+        self.field = field
+        self.error = error
+
+    def put(self, *args, **kwargs):
+        if self.error:
+            raise OSError(self.error)
+        return _Response(self.put_status, text=self.error)
+
+    def get(self, *args, **kwargs):
+        return _Response(self.get_status, {"fields": {"customfield_10814": self.field}})
+
+
+def test_jira_403_is_rejected():
+    result = asyncio.run(update_jira_status(_Session(put_status=403), "https://jira", {}, "ABC-1", "draft"))
+    assert not result.ok
+    assert result.state == "rejected"
+    assert "permission" in result.error
+
+
+def test_jira_network_failure_is_unconfirmed():
+    result = asyncio.run(update_jira_status(
+        _Session(error="connection reset"), "https://jira", {}, "ABC-1", "draft"
+    ))
+    assert not result.ok
+    assert result.state == "unconfirmed"
+    assert "connection reset" in result.error
+
+
+def test_jira_matching_adf_readback_confirms_publication():
+    from herald.jira import _text_to_adf
+    expected = _text_to_adf("* Color Status: Green\nDone")
+    result = asyncio.run(update_jira_status(_Session(field=expected), "https://jira", {}, "ABC-1", "* Color Status: Green\nDone"))
+    assert result.ok
+    assert result.state == "published"
+
+
+def test_jira_old_or_different_content_is_unconfirmed():
+    result = asyncio.run(update_jira_status(
+        _Session(field={"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "old"}]}]}),
+        "https://jira", {}, "ABC-1", "new",
+    ))
+    assert not result.ok
+    assert result.state == "unconfirmed"
+    assert "does not match" in result.error
+
+
+def test_adf_normalization_ignores_version_and_mark_order():
+    left = {"type": "doc", "version": 1, "content": [{"type": "text", "text": "x", "marks": [{"type": "strong"}, {"type": "em"}]}]}
+    right = {"version": 99, "content": [{"marks": [{"type": "em"}, {"type": "strong"}], "text": "x", "type": "text"}], "type": "doc"}
+    assert _normalized_adf(left) == _normalized_adf(right)
+
+
+def test_publication_failure_retry_publishes_once(monkeypatch):
+    from herald import app as app_module
+    from herald.jira import JiraUpdateResult
+    review = SimpleNamespace(
+        results={"ABC-1": ReviewResult("ABC-1", "approved", "Green", "draft")},
+        _publication_tasks={"ABC-1": object()},
+        _aiohttp_session=SimpleNamespace(closed=False), jira_url="https://jira",
+        auth_headers={}, _mark_action=lambda *args: None,
+        app=SimpleNamespace(notify=lambda *args, **kwargs: None),
+    )
+    outcomes = [
+        JiraUpdateResult(False, "permission denied", "rejected"),
+        JiraUpdateResult(True),
+    ]
+
+    async def fake_update(*args):
+        return outcomes.pop(0)
+
+    monkeypatch.setattr(app_module, "update_jira_status", fake_update)
+    asyncio.run(ReviewScreen._do_jira_update(review, "ABC-1", "draft"))
+    assert review.results["ABC-1"].publication_state == "failed"
+    assert review.results["ABC-1"].publication_error == "permission denied"
+
+    review.results["ABC-1"].publication_state = "pending"
+    review._publication_tasks["ABC-1"] = object()
+    asyncio.run(ReviewScreen._do_jira_update(review, "ABC-1", "draft"))
+    assert review.results["ABC-1"].publication_state == "published"
+    assert [r for r in review.results.values() if r.publication_state == "published"] == [review.results["ABC-1"]]
+
+
+def test_quit_waits_for_pending_publication():
+    result = ReviewResult("ABC-1", "approved", "Green", "draft", publication_state="pending")
+    review = SimpleNamespace(
+        _publication_tasks={"ABC-1": object()}, _aiohttp_session=None,
+        results={"ABC-1": result}, app=SimpleNamespace(notify=lambda *args, **kwargs: None),
+        dismissed=None,
+    )
+    review.dismiss = lambda results: setattr(review, "dismissed", results)
+
+    async def finish_write():
+        await asyncio.sleep(0.02)
+        result.publication_state = "published"
+        review._publication_tasks.clear()
+
+    async def run_quit():
+        asyncio.create_task(finish_write())
+        await ReviewScreen.action_quit_review(review)
+
+    asyncio.run(run_quit())
+    assert review.dismissed == [result]
+    assert result.publication_state == "published"
 
 
 # ─── extract_color ───────────────────────────────────────────────────────────
