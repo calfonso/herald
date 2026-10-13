@@ -1,4 +1,4 @@
-"""Unit tests for jira_status_update — all offline, no API keys required."""
+"""Unit tests for herald — all offline, no API keys required."""
 
 import argparse
 import base64
@@ -9,16 +9,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from jira_status_update.app import ReviewResult, edit_in_editor, extract_color
-from jira_status_update.config import UserPrefs, find_scripts_dir, find_skills_dir, load_prefs
-from jira_status_update.gather import (
+from herald.app import ReviewResult, edit_in_editor, extract_color
+from herald.config import UserPrefs, find_scripts_dir, find_skills_dir, load_prefs
+from herald.gather import (
     _field_to_text,
     _prune_issue,
     is_significant,
     load_current_statuses,
 )
-from jira_status_update.jira import get_jira_auth
-from jira_status_update.llm import TokenUsage, build_system_prompt
+from herald.jira import get_jira_auth
+from herald.llm import TokenUsage, build_system_prompt
 
 
 # ─── build_system_prompt ─────────────────────────────────────────────────────
@@ -30,7 +30,7 @@ def test_build_system_prompt_includes_skill_docs(tmp_path):
     (tmp_path / "formatting.md").write_text(formatting)
     prefs = UserPrefs(writing_rules=["No fractions"])
 
-    with patch("jira_status_update.llm.find_skills_dir", return_value=tmp_path):
+    with patch("herald.llm.find_skills_dir", return_value=tmp_path):
         prompt = build_system_prompt(prefs)
 
     assert activity in prompt
@@ -46,7 +46,7 @@ def test_build_system_prompt_no_user_rules(tmp_path):
     (tmp_path / "formatting.md").write_text("formatting")
     prefs = UserPrefs()
 
-    with patch("jira_status_update.llm.find_skills_dir", return_value=tmp_path):
+    with patch("herald.llm.find_skills_dir", return_value=tmp_path):
         prompt = build_system_prompt(prefs)
 
     assert "Additional writing rules" not in prompt
@@ -54,7 +54,7 @@ def test_build_system_prompt_no_user_rules(tmp_path):
 
 def test_build_system_prompt_missing_files_silently_skipped(tmp_path):
     prefs = UserPrefs()
-    with patch("jira_status_update.llm.find_skills_dir", return_value=tmp_path):
+    with patch("herald.llm.find_skills_dir", return_value=tmp_path):
         prompt = build_system_prompt(prefs)
     assert "You are a Jira status analyst" in prompt
 
@@ -185,13 +185,13 @@ def test_find_skills_dir_prefs_missing_path_raises(tmp_path):
 def test_find_skills_dir_env_var(tmp_path):
     fake_skills = tmp_path / "status-analysis"
     fake_skills.mkdir()
-    with patch.dict(os.environ, {"JIRA_STATUS_UPDATE_SKILLS_DIR": str(fake_skills)}):
+    with patch.dict(os.environ, {"HERALD_SKILLS_DIR": str(fake_skills)}):
         assert find_skills_dir() == fake_skills
 
 
 def test_find_skills_dir_env_var_missing_raises(tmp_path):
-    with patch.dict(os.environ, {"JIRA_STATUS_UPDATE_SKILLS_DIR": str(tmp_path / "gone")}):
-        with pytest.raises(FileNotFoundError, match="JIRA_STATUS_UPDATE_SKILLS_DIR not found"):
+    with patch.dict(os.environ, {"HERALD_SKILLS_DIR": str(tmp_path / "gone")}):
+        with pytest.raises(FileNotFoundError, match="HERALD_SKILLS_DIR not found"):
             find_skills_dir()
 
 

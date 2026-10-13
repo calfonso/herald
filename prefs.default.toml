@@ -1,5 +1,5 @@
-# Default preferences for jira-status-update
-# Copy to ~/.config/jira-status-update/prefs.toml and customize
+# Default preferences for herald
+# Copy to ~/.config/herald/prefs.toml and customize
 
 [llm]
 model = "claude-sonnet-5"
@@ -19,7 +19,7 @@ writing_rules = [
 [jira]
 url = "https://redhat.atlassian.net"
 # skills_dir is optional. When unset the app resolves it in order:
-#   1. JIRA_STATUS_UPDATE_SKILLS_DIR env var
+#   1. HERALD_SKILLS_DIR env var
 #   2. Previously auto-fetched copy in the platform data directory
 #   3. Repo-relative path (when running directly from the source tree)
 #   4. Auto git-clone of openshift-eng/ai-helpers into the data directory

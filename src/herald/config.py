@@ -28,10 +28,10 @@ class UserPrefs:
 
 
 def load_prefs(path: Optional[Path] = None) -> UserPrefs:
-    """Load from ~/.config/jira-status-update/prefs.toml or the given path."""
+    """Load from ~/.config/herald/prefs.toml or the given path."""
     if path is None:
         xdg = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
-        path = Path(xdg) / "jira-status-update" / "prefs.toml"
+        path = Path(xdg) / "herald" / "prefs.toml"
     if not path.exists():
         return UserPrefs()
     with open(path, "rb") as f:
@@ -57,7 +57,7 @@ def _get_cache_dir() -> Path:
         base = os.path.expanduser("~/Library/Caches")
     else:
         base = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
-    return Path(base) / "jira-status-update"
+    return Path(base) / "herald"
 
 
 def _cache_key(args) -> str:
@@ -121,7 +121,7 @@ def _get_data_dir() -> Path:
         base = os.path.expanduser("~/Library/Application Support")
     else:
         base = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
-    return Path(base) / "jira-status-update"
+    return Path(base) / "herald"
 
 
 def _fetch_ai_helpers(data_dir: Path) -> Path:
@@ -131,7 +131,7 @@ def _fetch_ai_helpers(data_dir: Path) -> Path:
         raise RuntimeError(
             "Skills directory not found and 'git' is unavailable to fetch it.\n"
             "Install git, or set [jira] skills_dir in prefs.toml, or set\n"
-            "JIRA_STATUS_UPDATE_SKILLS_DIR."
+            "HERALD_SKILLS_DIR."
         )
     data_dir.mkdir(parents=True, exist_ok=True)
     repo_dir = data_dir / "ai-helpers"
@@ -161,7 +161,7 @@ def find_skills_dir(prefs: Optional[UserPrefs] = None) -> Path:
     """Resolve the status-analysis skills directory using a multi-step search.
 
     1. [jira] skills_dir in prefs.toml (explicit override)
-    2. JIRA_STATUS_UPDATE_SKILLS_DIR env var
+    2. HERALD_SKILLS_DIR env var
     3. Platform data dir — previously auto-fetched copy
     4. Repo-relative path (when running directly from the source tree)
     5. Auto git-clone of openshift-eng/ai-helpers into the data directory
@@ -172,12 +172,12 @@ def find_skills_dir(prefs: Optional[UserPrefs] = None) -> Path:
             return p
         raise FileNotFoundError(f"skills_dir from prefs not found: {p}")
 
-    env = os.environ.get("JIRA_STATUS_UPDATE_SKILLS_DIR")
+    env = os.environ.get("HERALD_SKILLS_DIR")
     if env:
         p = Path(env)
         if p.exists():
             return p
-        raise FileNotFoundError(f"JIRA_STATUS_UPDATE_SKILLS_DIR not found: {p}")
+        raise FileNotFoundError(f"HERALD_SKILLS_DIR not found: {p}")
 
     cached = _get_data_dir() / "ai-helpers" / _SKILL_DIR_REL
     if cached.exists():

@@ -1,5 +1,5 @@
 [project]
-name = "jira-status-update"
+name = "herald"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -9,7 +9,7 @@ dependencies = [
     "textual>=3.0",
 ]
 [project.scripts]
-jira-status-update = "jira_status_update.cli:cli"
+herald = "herald.cli:cli"
 [build-system]
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"

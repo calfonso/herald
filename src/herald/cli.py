@@ -14,8 +14,8 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  jira-status-update --project OCPSTRAT --component "Hosted Control Planes"
-  jira-status-update --project OCPSTRAT --profile ocpstrat-hcp
+  herald --project OCPSTRAT --component "Hosted Control Planes"
+  herald --project OCPSTRAT --profile ocpstrat-hcp
 
 Environment variables:
   JIRA_USERNAME            Atlassian account email (required)
