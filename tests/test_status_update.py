@@ -195,11 +195,26 @@ def test_find_skills_dir_env_var_missing_raises(tmp_path):
             find_skills_dir()
 
 
-def test_find_skills_dir_dev_fallback():
-    # Running inside the source tree — repo-relative heuristic should resolve.
-    skills_dir = find_skills_dir()
-    assert skills_dir.name == "status-analysis"
-    assert skills_dir.parent.name == "skills"
+def test_find_skills_dir_repo_relative_fallback(tmp_path):
+    # When no prefs/env/cached copy is available, the repo-relative heuristic
+    # (step 4) is used. Patched so the test is offline and independent of where
+    # the package happens to be checked out.
+    fake_skills = tmp_path / "skills" / "status-analysis"
+    fake_skills.mkdir(parents=True)
+    with patch("herald.config._get_data_dir", return_value=tmp_path / "data"), \
+         patch("herald.config._find_repo_skills_dir", return_value=fake_skills):
+        assert find_skills_dir() == fake_skills
+
+
+def test_find_skills_dir_fetches_when_all_else_missing(tmp_path):
+    # Final fallback (step 5) delegates to _fetch_ai_helpers. Mocked so the
+    # test never performs a real network clone.
+    fetched = tmp_path / "fetched" / "status-analysis"
+    with patch("herald.config._get_data_dir", return_value=tmp_path / "data"), \
+         patch("herald.config._find_repo_skills_dir", return_value=None), \
+         patch("herald.config._fetch_ai_helpers", return_value=fetched) as mock_fetch:
+        assert find_skills_dir() == fetched
+    mock_fetch.assert_called_once()
 
 
 def test_find_scripts_dir_returns_scripts_subdir(tmp_path):
