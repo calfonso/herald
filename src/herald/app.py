@@ -36,23 +36,27 @@ from .llm import (
     fetch_model_pricing,
     request_changes_api,
 )
-
+from .validation import validate_draft
 
 def extract_color(draft: str) -> str:
-    """Extract R/Y/G color from a draft status update. Defaults to Green."""
-    for line in draft.split("\n"):
-        if "Color Status:" in line:
-            for color in ("Red", "Yellow", "Green"):
-                if color in line:
-                    return color
-    return "Green"
+    """Extract an unambiguous R/Y/G color, otherwise report Unknown."""
+    color, _ = validate_draft(draft)
+    return color or "Unknown"
+
+
+async def publish_validated_draft(update, session, jira_url, auth_headers, key, draft):
+    """Call the Jira writer only when the complete draft passes validation."""
+    _, error = validate_draft(draft)
+    if error:
+        return None, error
+    return await update(session, jira_url, auth_headers, key, draft), None
 
 
 @dataclass
 class ReviewResult:
     key: str
     action: str   # "approved", "skipped", "edited", "revised"
-    color: str    # "Green", "Yellow", "Red"
+    color: str    # "Green", "Yellow", "Red", or "Unknown"
     text: str
     publication_state: str = "pending"  # "pending", "published", "failed", "unconfirmed"
     publication_error: Optional[str] = None
@@ -182,6 +186,7 @@ class ReviewScreen(Screen):
         scripts_dir: Optional[Path] = None,
         args=None,
         system_prompt: str = "",
+        outcomes: Optional[dict[str, str]] = None,
     ):
         super().__init__()
         self.issues = issues
@@ -198,6 +203,7 @@ class ReviewScreen(Screen):
         self.scripts_dir = scripts_dir
         self.args = args
         self.system_prompt = system_prompt
+        self.outcomes = outcomes or {}
         self.results: dict[str, ReviewResult] = {}
         self._publication_tasks: dict[str, object] = {}
         self._aiohttp_session: Optional[aiohttp.ClientSession] = None
@@ -229,12 +235,17 @@ class ReviewScreen(Screen):
         for issue in self.issues:
             key = issue["key"]
             draft = self.drafts.get(key, "")
-            color = extract_color(draft) if draft else "-"
+            color = extract_color(draft)
             table.add_row(
                 key,
                 (issue.get("summary") or "")[:60],
                 color,
-                "-",
+                {
+                    "quiet_skip": "Quiet skip",
+                    "missing_data": "No data",
+                    "draft_failed": "Draft failed",
+                    "invalid_draft": "Invalid draft",
+                }.get(self.outcomes.get(key), "-"),
                 key=key,
             )
         if self.issues:
@@ -404,11 +415,16 @@ class ReviewScreen(Screen):
         if not key:
             return
         draft = self.drafts.get(key, "")
-        color = extract_color(draft)
         if key in self._publication_tasks:
             return
         result = self.results.get(key)
         if result and result.publication_state in ("pending", "published"):
+            return
+        color, error = validate_draft(draft)
+        if error:
+            self.query_one("#issue-table", DataTable).update_cell(key, self._col_keys[2], "Unknown")
+            self.query_one("#issue-table", DataTable).update_cell(key, self._col_keys[3], "Invalid draft")
+            self.app.notify(error, title="Cannot publish", severity="error")
             return
         if result is None or result.action == "skipped":
             result = ReviewResult(key=key, action="approved", color=color, text=draft)
@@ -459,9 +475,12 @@ class ReviewScreen(Screen):
             edited = edit_in_editor(draft)
         if edited:
             self.drafts[key] = edited
+            _, validation_error = validate_draft(edited)
+            self.outcomes[key] = "invalid_draft" if validation_error else "drafted"
             self._save_drafts()
             table = self.query_one("#issue-table", DataTable)
             table.update_cell(key, self._col_keys[2], extract_color(edited))
+            table.update_cell(key, self._col_keys[3], "Invalid draft" if validation_error else "-")
             self._update_draft_panel()
 
     def action_interactive_changes(self) -> None:
@@ -493,6 +512,8 @@ class ReviewScreen(Screen):
 
             issue_file = self.date_dir / "issues" / f"{key}.json"
             if not issue_file.exists():
+                self.outcomes[key] = "missing_data"
+                table.update_cell(key, self._col_keys[3], "No data")
                 self.app.notify(f"No data file for {key} after refresh", severity="error")
                 return
 
@@ -506,13 +527,17 @@ class ReviewScreen(Screen):
                 self.client, self.model, self.system_prompt, summary, self.usage,
             )
             self.drafts[key] = draft
+            _, validation_error = validate_draft(draft)
+            self.outcomes[key] = "invalid_draft" if validation_error else "drafted"
             self._save_drafts()
             table.update_cell(key, self._col_keys[2], extract_color(draft))
-            table.update_cell(key, self._col_keys[3], "-")
+            table.update_cell(key, self._col_keys[3], "Invalid draft" if validation_error else "-")
             self.results.pop(key, None)
             self._update_draft_panel()
             self.app.notify(f"{key} refreshed")
         except Exception as e:
+            self.outcomes[key] = "draft_failed"
+            table.update_cell(key, self._col_keys[3], "Draft failed")
             self.app.notify(str(e), title="Refresh failed", severity="error")
         finally:
             draft_panel.loading = False
@@ -547,22 +572,40 @@ class ReviewScreen(Screen):
                 if drafts_path.exists():
                     drafts_path.unlink()
 
-            drafts, summaries, failed = await batch_draft(
+            drafts, summaries, failed, outcomes = await batch_draft(
                 self.client, self.model, self.system_prompt, date_dir,
                 manifest["issues"], self.usage,
             )
+            for key in outcomes:
+                self.drafts.pop(key, None)
             self.drafts.update(drafts)
+            self.outcomes.update(outcomes)
             if failed:
+                categories = ", ".join(
+                    f"{name}: {sum(outcomes.get(key) == state for key in failed)}"
+                    for name, state in (
+                        ("no data", "missing_data"),
+                        ("draft failures", "draft_failed"),
+                        ("invalid output", "invalid_draft"),
+                    )
+                )
                 self.app.notify(
-                    f"Failed to draft: {', '.join(failed)}", title="Some drafts failed", severity="warning",
+                    f"{categories}. Use r to retry or e/i to recover drafts.",
+                    title="Drafts need attention",
+                    severity="warning",
                 )
             self.summaries.update(summaries)
             self._save_drafts()
             for issue in self.issues:
                 key = issue["key"]
                 draft = self.drafts.get(key, "")
-                table.update_cell(key, self._col_keys[2], extract_color(draft) if draft else "-")
-                table.update_cell(key, self._col_keys[3], "-")
+                table.update_cell(key, self._col_keys[2], extract_color(draft))
+                table.update_cell(key, self._col_keys[3], {
+                    "quiet_skip": "Quiet skip",
+                    "missing_data": "No data",
+                    "draft_failed": "Draft failed",
+                    "invalid_draft": "Invalid draft",
+                }.get(self.outcomes.get(key), "-"))
                 self.results.pop(key, None)
             self._update_panels()
             self.app.notify(f"All {len(manifest['issues'])} issues refreshed")
@@ -597,9 +640,12 @@ class ReviewScreen(Screen):
                         issue_key=key, date_dir=self.date_dir,
                     )
                 self.drafts[key] = revised
+                _, validation_error = validate_draft(revised)
+                self.outcomes[key] = "invalid_draft" if validation_error else "drafted"
                 self._save_drafts()
                 table = self.query_one("#issue-table", DataTable)
                 table.update_cell(key, self._col_keys[2], extract_color(revised))
+                table.update_cell(key, self._col_keys[3], "Invalid draft" if validation_error else "-")
                 self._update_draft_panel()
             except Exception as e:
                 self.app.notify(str(e), title="Revision failed", severity="error")
@@ -615,9 +661,12 @@ class ReviewScreen(Screen):
                 self.client, self.model, draft, summary, instruction, self.usage,
             )
             self.drafts[key] = revised
+            _, validation_error = validate_draft(revised)
+            self.outcomes[key] = "invalid_draft" if validation_error else "drafted"
             self._save_drafts()
             table = self.query_one("#issue-table", DataTable)
             table.update_cell(key, self._col_keys[2], extract_color(revised))
+            table.update_cell(key, self._col_keys[3], "Invalid draft" if validation_error else "-")
             self._update_draft_panel()
         except Exception as e:
             self.app.notify(str(e), title="Revision failed", severity="error")
@@ -627,9 +676,16 @@ class ReviewScreen(Screen):
         try:
             if self._aiohttp_session is None or self._aiohttp_session.closed:
                 self._aiohttp_session = aiohttp.ClientSession()
-            update = await update_jira_status(
-                self._aiohttp_session, self.jira_url, self.auth_headers, key, draft
+            update, error = await publish_validated_draft(
+                update_jira_status, self._aiohttp_session,
+                self.jira_url, self.auth_headers, key, draft,
             )
+            if error:
+                result.publication_state = "failed"
+                result.publication_error = error
+                self._mark_action(key, "Invalid draft")
+                self.app.notify(error, title="Cannot publish", severity="error")
+                return
             result.publication_state = (
                 "published" if update.ok else
                 "unconfirmed" if update.state == "unconfirmed" else "failed"
@@ -754,18 +810,24 @@ class StatusUpdateApp(App):
             system_prompt = build_system_prompt(prefs)
             only_significant = getattr(args, "skip_quiet", False)
 
-            drafts, summaries, failed = await batch_draft(
+            drafts, summaries, failed, outcomes = await batch_draft(
                 client, model, system_prompt, date_dir,
                 manifest["issues"], usage,
                 callback=self._make_callback(),
                 only_significant=only_significant,
             )
+            quiet = sum(state == "quiet_skip" for state in outcomes.values())
+            missing = sum(state == "missing_data" for state in outcomes.values())
+            invalid = sum(state == "invalid_draft" for state in outcomes.values())
+            self._log(f"  Quiet skips: {quiet}; missing data: {missing}; invalid drafts: {invalid}")
             self._log(
                 f"[green]✓[/green] Drafted {len(drafts)} issues ({usage.calls} API calls)"
             )
             if failed:
+                drafting = sum(state == "draft_failed" for state in outcomes.values())
                 self._log(
-                    f"[yellow]⚠[/yellow] Failed to draft {len(failed)} issues: {', '.join(failed)}"
+                    f"[yellow]⚠[/yellow] Needs attention — missing data: {missing}; "
+                    f"drafting failures: {drafting}; invalid drafts: {invalid}"
                 )
 
             current_statuses = load_current_statuses(date_dir, [i["key"] for i in manifest["issues"]])
@@ -786,6 +848,7 @@ class StatusUpdateApp(App):
                     scripts_dir=self.scripts_dir,
                     args=self.args,
                     system_prompt=system_prompt,
+                    outcomes=outcomes,
                 )
             ) or []
 
