@@ -161,6 +161,11 @@ def build_system_prompt(prefs: UserPrefs) -> str:
 
     parts.append(
         "Produce only the `ryg_field` format output defined in formatting.md. "
-        "No preamble, no explanation — output starts with `* Color Status:`."
+        "No preamble, no explanation — output starts with `* Color Status:`.\n\n"
+        "CRITICAL FORMATTING RULE: Use standard markdown bullets only. "
+        "Top-level bullets are `* ` and nested bullets are `  * ` (two spaces "
+        "+ asterisk + space). NEVER use wiki-style `**` for sub-bullets — the "
+        "output is parsed as markdown and `**` will be misinterpreted as bold "
+        "markers, corrupting the Jira field."
     )
     return "\n".join(parts)
