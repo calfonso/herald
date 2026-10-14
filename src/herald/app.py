@@ -1,5 +1,6 @@
 """Textual TUI: ReviewScreen for interactive review and StatusUpdateApp for the full pipeline."""
 
+import asyncio
 import json
 import os
 import subprocess
@@ -53,6 +54,8 @@ class ReviewResult:
     action: str   # "approved", "skipped", "edited", "revised"
     color: str    # "Green", "Yellow", "Red"
     text: str
+    publication_state: str = "pending"  # "pending", "published", "failed", "unconfirmed"
+    publication_error: Optional[str] = None
 
 
 def edit_in_editor(draft_text: str) -> Optional[str]:
@@ -152,7 +155,8 @@ class ReviewScreen(Screen):
     """
 
     BINDINGS = [
-        Binding("a", "approve", "Approve", show=True),
+        Binding("a", "approve", "Publish to Jira", show=True),
+        Binding("p", "retry_publish", "Retry publish", show=True),
         Binding("s", "skip", "Skip", show=True),
         Binding("e", "edit", "Edit in $EDITOR", show=True),
         Binding("i", "interactive_changes", "Interactive changes", show=True),
@@ -195,6 +199,7 @@ class ReviewScreen(Screen):
         self.args = args
         self.system_prompt = system_prompt
         self.results: dict[str, ReviewResult] = {}
+        self._publication_tasks: dict[str, object] = {}
         self._aiohttp_session: Optional[aiohttp.ClientSession] = None
         self._col_keys = None
         # Vim-style search state.
@@ -289,6 +294,12 @@ class ReviewScreen(Screen):
         draft_panel = self.query_one("#draft-panel", RichLog)
         draft_panel.clear()
         draft_panel.write(f"[bold]New draft — {key}[/bold]\n\n{draft}")
+        result = self.results.get(key)
+        if result and result.publication_error:
+            draft_panel.write(
+                f"\n\n[bold red]Publication {result.publication_state}[/bold red]\n"
+                f"{result.publication_error}\nPress p to retry."
+            )
         draft_panel.scroll_home(animate=False)
 
         previous = self.current_statuses.get(key, "")
@@ -314,7 +325,7 @@ class ReviewScreen(Screen):
             f"  {approved + skipped}/{total} reviewed  |  "
             f"{approved} approved  {skipped} skipped  |  "
             f"j/k=nav  /=search  n/N=match  ^w j/k=panes  "
-            f"a=approve  s=skip  e=edit  i=revise  r=refresh  R=refresh all  q=quit"
+            f"a=publish  p=retry  s=skip  e=edit  i=revise  r=refresh  R=refresh all  q=quit"
         )
 
     def _mark_action(self, key: str, label: str) -> None:
@@ -394,14 +405,44 @@ class ReviewScreen(Screen):
             return
         draft = self.drafts.get(key, "")
         color = extract_color(draft)
-        self.results[key] = ReviewResult(key=key, action="approved", color=color, text=draft)
-        self._mark_action(key, "Approved")
-        self.run_worker(self._do_jira_update(key, draft), exclusive=False)
+        if key in self._publication_tasks:
+            return
+        result = self.results.get(key)
+        if result and result.publication_state in ("pending", "published"):
+            return
+        if result is None or result.action == "skipped":
+            result = ReviewResult(key=key, action="approved", color=color, text=draft)
+            self.results[key] = result
+        else:
+            result.text = draft
+            result.color = color
+        result.publication_state = "pending"
+        result.publication_error = None
+        self._mark_action(key, "Publishing…")
+        self._start_jira_update(key, draft)
         self._advance()
+
+    def action_retry_publish(self) -> None:
+        key = self._current_key()
+        if not key:
+            return
+        result = self.results.get(key)
+        if result is None or result.publication_state not in ("failed", "unconfirmed"):
+            self.app.notify(f"{key} has no failed publication to retry", severity="warning")
+            return
+        self.action_approve()
+
+    def _start_jira_update(self, key: str, draft: str) -> None:
+        self._publication_tasks[key] = self.run_worker(
+            self._do_jira_update(key, draft), name=f"publish-{key}", exclusive=False
+        )
 
     def action_skip(self) -> None:
         key = self._current_key()
         if not key:
+            return
+        if key in self._publication_tasks:
+            self.app.notify(f"{key} is currently publishing", severity="warning")
             return
         draft = self.drafts.get(key, "")
         color = extract_color(draft)
@@ -432,6 +473,9 @@ class ReviewScreen(Screen):
         key = self._current_key()
         if not key or not self.scripts_dir or not self.args:
             self.app.notify("Refresh not available", severity="error")
+            return
+        if key in self._publication_tasks:
+            self.app.notify(f"{key} is currently publishing", severity="warning")
             return
         self.run_worker(self._do_refresh(key), exclusive=False)
 
@@ -476,6 +520,9 @@ class ReviewScreen(Screen):
     def action_refresh_all(self) -> None:
         if not self.scripts_dir or not self.args:
             self.app.notify("Refresh not available", severity="error")
+            return
+        if self._publication_tasks:
+            self.app.notify("Wait for Jira publications before refreshing", severity="warning")
             return
         self.run_worker(self._do_refresh_all(), exclusive=False)
 
@@ -576,21 +623,49 @@ class ReviewScreen(Screen):
             self.app.notify(str(e), title="Revision failed", severity="error")
 
     async def _do_jira_update(self, key: str, draft: str) -> None:
-        if self._aiohttp_session is None or self._aiohttp_session.closed:
-            self._aiohttp_session = aiohttp.ClientSession()
-        result = await update_jira_status(
-            self._aiohttp_session, self.jira_url, self.auth_headers, key, draft
-        )
-        table = self.query_one("#issue-table", DataTable)
-        if result.ok:
-            table.update_cell(key, self._col_keys[3], "✓ Submitted")
-        else:
-            table.update_cell(key, self._col_keys[3], "✗ FAILED")
-            self.app.notify(f"{key}: {result.error}", title="Jira update failed", severity="error")
+        result = self.results[key]
+        try:
+            if self._aiohttp_session is None or self._aiohttp_session.closed:
+                self._aiohttp_session = aiohttp.ClientSession()
+            update = await update_jira_status(
+                self._aiohttp_session, self.jira_url, self.auth_headers, key, draft
+            )
+            result.publication_state = (
+                "published" if update.ok else
+                "unconfirmed" if update.state == "unconfirmed" else "failed"
+            )
+            result.publication_error = update.error
+            if update.ok:
+                self._mark_action(key, "✓ Published")
+            else:
+                self._mark_action(key, "✗ FAILED" if update.state == "rejected" else "? UNCONFIRMED")
+                self.app.notify(
+                    f"{key}: {update.error} (press p to retry)",
+                    title="Jira publication failed", severity="error",
+                )
+        except Exception as exc:
+            result.publication_state = "failed"
+            result.publication_error = f"Jira request failed: {exc}"
+            self._mark_action(key, "✗ FAILED")
+            self.app.notify(
+                f"{key}: {result.publication_error} (press p to retry)",
+                title="Jira publication failed", severity="error",
+            )
+        finally:
+            self._publication_tasks.pop(key, None)
 
-    def action_quit_review(self) -> None:
+    async def action_quit_review(self) -> None:
+        pending = list(self._publication_tasks.values())
+        if pending:
+            self.app.notify(
+                f"Waiting for {len(pending)} Jira publication(s); results will be included before closing.",
+                title="Publication pending", severity="warning",
+            )
+            # Workers own these awaits; wait until each task reaches a final state.
+            while self._publication_tasks:
+                await asyncio.sleep(0.05)
         if self._aiohttp_session and not self._aiohttp_session.closed:
-            self.run_worker(self._aiohttp_session.close(), exclusive=False)
+            await self._aiohttp_session.close()
         self.dismiss(list(self.results.values()))
 
 
@@ -716,30 +791,39 @@ class StatusUpdateApp(App):
 
             self._set_phase("Done")
             approved = [r for r in results if r.action in ("approved", "edited", "revised")]
+            published = [r for r in approved if r.publication_state == "published"]
+            failed_publications = [r for r in approved if r.publication_state in ("failed", "unconfirmed")]
+            pending_publications = [r for r in approved if r.publication_state == "pending"]
             skipped = [r for r in results if r.action == "skipped"]
-            green = sum(1 for r in approved if r.color == "Green")
-            yellow = sum(1 for r in approved if r.color == "Yellow")
-            red = sum(1 for r in approved if r.color == "Red")
+            green = sum(1 for r in published if r.color == "Green")
+            yellow = sum(1 for r in published if r.color == "Yellow")
+            red = sum(1 for r in published if r.color == "Red")
             pricing = fetch_model_pricing(model)
             cost_str = f"${usage.cost(pricing):.4f}" if pricing else "unknown"
 
             self._log(f"\n[bold]Summary[/bold]")
             self._log(
-                f"  Updated: {len(approved)} "
+                f"  Updated: {len(published)} "
                 f"(Green: {green}, Yellow: {yellow}, Red: {red})"
             )
+            self._log(f"  Failed: {len(failed_publications)}")
+            self._log(f"  Pending: {len(pending_publications)}")
             self._log(f"  Skipped: {len(skipped)}")
             self._log(
                 f"  LLM: {usage.calls} calls, "
                 f"{usage.input_tokens + usage.output_tokens} tokens, "
                 f"{cost_str} ({model})"
             )
-            if approved:
+            if published:
                 self._log("\n[bold]Updated issues:[/bold]")
                 tags = {"Green": "green", "Yellow": "yellow", "Red": "red"}
-                for r in approved:
+                for r in published:
                     tag = tags.get(r.color, "white")
                     self._log(f"  [{tag}]{r.color}[/{tag}] {r.key}")
+            if failed_publications:
+                self._log("\n[bold red]Publication failures:[/bold red]")
+                for r in failed_publications:
+                    self._log(f"  {r.key}: {r.publication_error or r.publication_state}")
 
             self._log("\n[dim]Press q to exit.[/dim]")
 
