@@ -10,6 +10,7 @@ import pyadf
 
 from .config import _find_cached_gather, _save_cache_meta
 from .llm import TokenUsage, draft_ryg
+from .validation import validate_draft
 
 
 async def run_gather(
@@ -247,7 +248,10 @@ async def batch_draft(
     callback=None,
     only_significant: bool = False,
 ) -> tuple:
-    """Draft R/Y/G for all issues in parallel; return (drafts, summaries, failed) tuple."""
+    """Return drafts, summaries, failed keys, and per-key outcomes.
+
+    Outcomes are drafted, quiet_skip, missing_data, draft_failed, or invalid_draft.
+    """
     saved = load_saved_drafts(date_dir)
     sem = asyncio.Semaphore(10)
     max_retries = 3
@@ -255,11 +259,6 @@ async def batch_draft(
     async def draft_one(issue, idx):
         async with sem:
             key = issue["key"]
-            if key in saved:
-                if callback:
-                    await callback(idx + 1, len(issues), f"Loaded {key} (cached draft)")
-                return key, saved[key], "(cached)"
-
             path = date_dir / "issues" / f"{key}.json"
             try:
                 with open(path) as f:
@@ -267,12 +266,19 @@ async def batch_draft(
             except (FileNotFoundError, json.JSONDecodeError):
                 if callback:
                     await callback(idx + 1, len(issues), f"Skipped {key} (no data file)")
-                return key, None, None
+                return key, None, None, "missing_data"
 
             if only_significant and not is_significant(data):
                 if callback:
                     await callback(idx + 1, len(issues), f"Skipped {key} (not significant)")
-                return key, None, None
+                return key, None, None, "quiet_skip"
+
+            if key in saved:
+                _, cache_error = validate_draft(saved[key])
+                if not cache_error:
+                    if callback:
+                        await callback(idx + 1, len(issues), f"Loaded {key} (cached draft)")
+                    return key, saved[key], "(cached)", "drafted"
 
             try:
                 summary = json.dumps(_prune_issue(data), indent=2)
@@ -281,15 +287,21 @@ async def batch_draft(
                 print(f"Warning: {msg}", file=sys.stderr)
                 if callback:
                     await callback(idx + 1, len(issues), msg)
-                return key, None, None
+                return key, None, None, "draft_failed"
 
             last_err = None
             for attempt in range(max_retries):
                 try:
                     draft = await draft_ryg(client, model, system_prompt, summary, usage)
+                    _, validation_error = validate_draft(draft)
+                    if validation_error:
+                        msg = f"Invalid draft for {key}: {validation_error}"
+                        if callback:
+                            await callback(idx + 1, len(issues), msg)
+                        return key, None, summary, "invalid_draft"
                     if callback:
                         await callback(idx + 1, len(issues), f"Drafted {key}")
-                    return key, draft, summary
+                    return key, draft, summary, "drafted"
                 except Exception as e:
                     last_err = e
                     if attempt < max_retries - 1:
@@ -299,7 +311,7 @@ async def batch_draft(
             print(f"Warning: {msg}", file=sys.stderr)
             if callback:
                 await callback(idx + 1, len(issues), msg)
-            return key, None, None
+            return key, None, None, "draft_failed"
 
     tasks = [draft_one(issue, i) for i, issue in enumerate(issues)]
     raw_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -307,17 +319,19 @@ async def batch_draft(
     drafts: dict[str, str] = {}
     result_summaries: dict[str, str] = {}
     failed: list[str] = []
+    outcomes: dict[str, str] = {}
     for r in raw_results:
         if isinstance(r, Exception):
             print(f"Warning: draft failed: {r}", file=sys.stderr)
             continue
-        key, draft, summary = r
+        key, draft, summary, outcome = r
+        outcomes[key] = outcome
         if draft:
             drafts[key] = draft
-        elif key:
+        elif outcome in ("missing_data", "draft_failed", "invalid_draft"):
             failed.append(key)
         if summary and summary != "(cached)":
             result_summaries[key] = summary
 
     save_drafts(date_dir, drafts)
-    return drafts, result_summaries, failed
+    return drafts, result_summaries, failed, outcomes

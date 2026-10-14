@@ -11,13 +11,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from herald.app import ReviewResult, ReviewScreen, edit_in_editor, extract_color
+from herald.app import ReviewResult, ReviewScreen, edit_in_editor, extract_color, publish_validated_draft
 from herald.config import UserPrefs, find_scripts_dir, find_skills_dir, load_prefs
 from herald.gather import (
     _field_to_text,
     _prune_issue,
     is_significant,
     load_current_statuses,
+    batch_draft,
 )
 from herald.jira import _normalized_adf, get_jira_auth, update_jira_status
 from herald.llm import TokenUsage, build_system_prompt
@@ -224,8 +225,9 @@ def test_adf_normalization_ignores_version_and_mark_order():
 def test_publication_failure_retry_publishes_once(monkeypatch):
     from herald import app as app_module
     from herald.jira import JiraUpdateResult
+    draft = "* Color Status: Green\nImplementation complete."
     review = SimpleNamespace(
-        results={"ABC-1": ReviewResult("ABC-1", "approved", "Green", "draft")},
+        results={"ABC-1": ReviewResult("ABC-1", "approved", "Green", draft)},
         _publication_tasks={"ABC-1": object()},
         _aiohttp_session=SimpleNamespace(closed=False), jira_url="https://jira",
         auth_headers={}, _mark_action=lambda *args: None,
@@ -240,13 +242,13 @@ def test_publication_failure_retry_publishes_once(monkeypatch):
         return outcomes.pop(0)
 
     monkeypatch.setattr(app_module, "update_jira_status", fake_update)
-    asyncio.run(ReviewScreen._do_jira_update(review, "ABC-1", "draft"))
+    asyncio.run(ReviewScreen._do_jira_update(review, "ABC-1", draft))
     assert review.results["ABC-1"].publication_state == "failed"
     assert review.results["ABC-1"].publication_error == "permission denied"
 
     review.results["ABC-1"].publication_state = "pending"
     review._publication_tasks["ABC-1"] = object()
-    asyncio.run(ReviewScreen._do_jira_update(review, "ABC-1", "draft"))
+    asyncio.run(ReviewScreen._do_jira_update(review, "ABC-1", draft))
     assert review.results["ABC-1"].publication_state == "published"
     assert [r for r in review.results.values() if r.publication_state == "published"] == [review.results["ABC-1"]]
 
@@ -288,13 +290,132 @@ def test_extract_color_red():
     assert extract_color("* Color Status: Red\nBlocked") == "Red"
 
 
-def test_extract_color_defaults_to_green_when_missing():
-    assert extract_color("No color line here") == "Green"
+def test_extract_color_unknown_when_missing_or_ambiguous():
+    assert extract_color("No color line here") == "Unknown"
+    assert extract_color("* Color Status: Red\n* Color Status: Green\nUpdate") == "Unknown"
 
 
 def test_extract_color_case_sensitive():
-    # Color names are title-case; lowercase doesn't match
-    assert extract_color("* Color Status: green") == "Green"  # defaults
+    assert extract_color("* Color Status: green\nUpdate details") == "Green"
+
+
+def test_invalid_drafts_never_call_jira_writer():
+    calls = []
+
+    async def writer(*args):
+        calls.append(args)
+
+    for text in ("", "Not a status update", "* Color Status: Green", "* Color Status: Blue\nUpdate"):
+        result, error = asyncio.run(publish_validated_draft(writer, None, "url", {}, "ABC-1", text))
+        assert result is None
+        assert error
+    assert calls == []
+
+
+def test_valid_draft_remains_publishable():
+    async def writer(*args):
+        return "written"
+
+    result, error = asyncio.run(publish_validated_draft(
+        writer, None, "url", {}, "ABC-1", "* Color Status: Yellow\nUpdate details"
+    ))
+    assert result == "written"
+    assert error is None
+
+
+@pytest.mark.parametrize("draft", ["", "Not a status update", "* Color Status: Green"])
+def test_invalid_draft_does_not_start_publication(draft):
+    table = MagicMock()
+    review = SimpleNamespace(
+        _current_key=lambda: "ABC-1", drafts={"ABC-1": draft},
+        _publication_tasks={}, results={}, _col_keys=(0, 1, 2, 3),
+        query_one=lambda *args: table,
+        app=SimpleNamespace(notify=MagicMock()),
+        _start_jira_update=MagicMock(), _advance=MagicMock(),
+    )
+    ReviewScreen.action_approve(review)
+    review._start_jira_update.assert_not_called()
+    review._advance.assert_not_called()
+    assert review.results == {}
+    review.app.notify.assert_called_once()
+
+
+def test_invalid_worker_draft_clears_pending_publication(monkeypatch):
+    from herald import app as app_module
+
+    writer = MagicMock()
+    monkeypatch.setattr(app_module, "update_jira_status", writer)
+    review = SimpleNamespace(
+        results={"ABC-1": ReviewResult("ABC-1", "approved", "Unknown", "")},
+        _publication_tasks={"ABC-1": object()},
+        _aiohttp_session=SimpleNamespace(closed=False), jira_url="https://jira",
+        auth_headers={}, _mark_action=MagicMock(),
+        app=SimpleNamespace(notify=MagicMock()),
+    )
+    asyncio.run(ReviewScreen._do_jira_update(review, "ABC-1", ""))
+    writer.assert_not_called()
+    assert review._publication_tasks == {}
+    assert review.results["ABC-1"].publication_state == "failed"
+    assert review.results["ABC-1"].publication_error
+    review._mark_action.assert_called_once_with("ABC-1", "Invalid draft")
+
+
+def test_batch_draft_distinguishes_quiet_skip_and_missing_data(tmp_path):
+    from herald import gather
+
+    issues = [{"key": "QUIET-1"}, {"key": "MISSING-1"}]
+    issue_dir = tmp_path / "issues"
+    issue_dir.mkdir()
+    (issue_dir / "QUIET-1.json").write_text(json.dumps({"issue": {}, "prs": []}))
+    usage = TokenUsage()
+    drafts, summaries, failed, outcomes = asyncio.run(batch_draft(
+        None, "model", "prompt", tmp_path, issues, usage, only_significant=True
+    ))
+    assert drafts == {}
+    assert outcomes == {"QUIET-1": "quiet_skip", "MISSING-1": "missing_data"}
+    assert failed == ["MISSING-1"]
+
+
+def test_batch_draft_rejects_malformed_llm_output(tmp_path, monkeypatch):
+    from herald import gather
+
+    issue_dir = tmp_path / "issues"
+    issue_dir.mkdir()
+    (issue_dir / "ABC-1.json").write_text(json.dumps({"issue": {"key": "ABC-1"}}))
+
+    async def malformed(*args):
+        return "No status here"
+
+    monkeypatch.setattr(gather, "draft_ryg", malformed)
+    drafts, summaries, failed, outcomes = asyncio.run(batch_draft(
+        None, "model", "prompt", tmp_path, [{"key": "ABC-1"}], TokenUsage()
+    ))
+    assert drafts == {}
+    assert failed == ["ABC-1"]
+    assert outcomes == {"ABC-1": "invalid_draft"}
+
+
+def test_batch_draft_classifies_llm_failure_separately(tmp_path, monkeypatch):
+    from herald import gather
+
+    issue_dir = tmp_path / "issues"
+    issue_dir.mkdir()
+    (issue_dir / "ABC-1.json").write_text(json.dumps({"issue": {"key": "ABC-1"}}))
+
+    async def broken(*args):
+        raise RuntimeError("offline")
+
+    async def no_wait(*args):
+        return None
+
+    monkeypatch.setattr(gather, "draft_ryg", broken)
+    monkeypatch.setattr(gather.asyncio, "sleep", no_wait)
+    drafts, summaries, failed, outcomes = asyncio.run(batch_draft(
+        None, "model", "prompt", tmp_path, [{"key": "ABC-1"}], TokenUsage()
+    ))
+    assert drafts == {}
+    assert failed == ["ABC-1"]
+    assert outcomes == {"ABC-1": "draft_failed"}
 
 
 # ─── find_scripts_dir / find_skills_dir ──────────────────────────────────────
