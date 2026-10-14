@@ -12,6 +12,24 @@ import anthropic
 from .config import UserPrefs, find_skills_dir
 
 
+_TEMPORAL_EVIDENCE_RULES = (
+    "Temporal evidence rules:\n"
+    "- Treat only events in `events_in_window` with an event-specific `occurred_at` "
+    "as evidence that an accomplishment happened during this reporting window.\n"
+    "- `carry_forward_context` describes current or historical state. It may support "
+    "a continuing risk or blocker, but does not establish when an accomplishment occurred.\n"
+    "- A pull request's current state or `merged_at` in carry-forward context does not "
+    "make its merge a new accomplishment this week. A dated in-window review or commit "
+    "may be reported as that specific activity.\n"
+    "- A recent comment is evidence that the comment was made, not that older work "
+    "described in it happened during this window.\n"
+    "- Treat `undated_activity` and unknown reporting-window or gather-freshness metadata "
+    "as uncertainty. Do not turn it into a new accomplishment or infer a date.\n"
+    "- It is valid to report no new milestone this week. Describe recurring blockers and "
+    "risks as continuing conditions.\n"
+)
+
+
 LITELLM_PRICING_URL = (
     "https://raw.githubusercontent.com/BerriAI/litellm/main/"
     "model_prices_and_context_window.json"
@@ -121,7 +139,11 @@ async def request_changes_api(
     response = await client.messages.create(
         model=model,
         max_tokens=2048,
-        system="You are revising a Jira R/Y/G status update. Output ONLY the revised status update in the exact same format.",
+        system=(
+            "You are revising a Jira R/Y/G status update. Output ONLY the revised "
+            "status update in the exact same format.\n\n"
+            + _TEMPORAL_EVIDENCE_RULES
+        ),
         messages=[{
             "role": "user",
             "content": (
@@ -147,6 +169,7 @@ def build_system_prompt(prefs: UserPrefs) -> str:
     parts = [
         "You are a Jira status analyst producing weekly R/Y/G status updates.",
         "Apply the analysis methodology and output format defined below.\n",
+        _TEMPORAL_EVIDENCE_RULES,
     ]
     for filename in ("activity-analysis.md", "formatting.md"):
         path = skills_dir / filename

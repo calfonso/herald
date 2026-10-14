@@ -143,6 +143,11 @@ When `coding_agent` is configured in prefs, `i` suspends the TUI and opens the a
 uv run pytest tests/ -v
 ```
 
+## Design specifications
+
+See [specs/](specs/README.md) for the exact initial drafting API inputs and
+the data flows for gathering, caching, review, revision, and Jira publication.
+
 ## Project structure
 
 ```
