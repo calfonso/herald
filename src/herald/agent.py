@@ -54,6 +54,13 @@ def _build_agent_prompt(
         f"its entire contents. The output must keep the exact same format — "
         f"starting with '* Color Status:'. No preamble, no explanation, just "
         f"the status update.\n"
+        f"6. Use the Jira Cloud `ryg_field_markdown` format: top-level bullets "
+        f"are '* ', nested bullets are two spaces followed by '* ', and wiki-style "
+        f"'**' sub-bullets are prohibited. Render PR references as Markdown links "
+        f"labeled 'owner/repo#number' and use the PR URL and repository from the "
+        f"evidence; do not output bare '#number' or shorthand 'repo#number', and "
+        f"do not put raw PR URLs in parentheses. The URL belongs only in the "
+        f"Markdown link target; never guess missing repository or URL details.\n"
     )
 
 

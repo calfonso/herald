@@ -7,11 +7,12 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pyadf
 
-from .config import _find_cached_gather, _save_cache_meta
+from .config import _find_cached_gather, _get_state_dir, _save_cache_meta
 from .llm import TokenUsage, draft_ryg
 from .validation import validate_draft
 
@@ -30,6 +31,26 @@ def _parse_instant(value) -> Optional[datetime]:
     except ValueError:
         return None
     return instant if instant.tzinfo is not None else None
+
+
+def _github_repository(url: Optional[str]) -> Optional[str]:
+    """Extract owner/repo from a canonical GitHub pull request URL."""
+    if not isinstance(url, str):
+        return None
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return None
+    parts = parsed.path.strip("/").split("/")
+    if (
+        parsed.hostname == "github.com"
+        and len(parts) >= 4
+        and parts[2] == "pull"
+        and parts[0]
+        and parts[1]
+    ):
+        return f"{parts[0]}/{parts[1]}"
+    return None
 
 
 def _temporal_context(manifest: Optional[dict], issue_key: Optional[str] = None) -> dict:
@@ -291,6 +312,8 @@ def _prune_issue(data: dict, manifest: Optional[dict] = None) -> dict:
     pruned["carry_forward_context"]["pull_requests"] = [
         {
             "number": pr.get("number"),
+            "repository": pr.get("repository") or _github_repository(pr.get("url")),
+            "url": pr.get("url"),
             "title": pr.get("title"),
             "state": pr.get("state"),
             "is_draft": pr.get("is_draft", False),
@@ -342,12 +365,25 @@ def load_current_statuses(date_dir: Path, issue_keys: list) -> dict:
 
 # ─── Draft Persistence ───────────────────────────────────────────────────────
 
+def _draft_state_dir(date_dir: Path) -> Path:
+    """Return state storage scoped to the gathered output directory and date."""
+    output_id = hashlib.sha256(
+        str(date_dir.parent.resolve()).encode("utf-8")
+    ).hexdigest()[:16]
+    return _get_state_dir() / "drafts" / output_id / date_dir.name
+
+
 def _drafts_path(date_dir: Path) -> Path:
-    return date_dir / "drafts.json"
+    return _draft_state_dir(date_dir) / "drafts.json"
 
 
 def _draft_inputs_path(date_dir: Path) -> Path:
-    return date_dir / "draft_inputs.json"
+    return _draft_state_dir(date_dir) / "draft_inputs.json"
+
+
+def _legacy_draft_path(date_dir: Path, filename: str) -> Path:
+    """Path used before draft state moved out of the gathered data directory."""
+    return date_dir / filename
 
 
 def _input_fingerprint(summary: str) -> str:
@@ -356,6 +392,8 @@ def _input_fingerprint(summary: str) -> str:
 
 def _load_draft_inputs(date_dir: Path) -> dict:
     path = _draft_inputs_path(date_dir)
+    if not path.exists():
+        path = _legacy_draft_path(date_dir, "draft_inputs.json")
     if not path.exists():
         return {}
     try:
@@ -369,13 +407,17 @@ def save_draft_input(date_dir: Path, key: str, summary: str) -> None:
     """Record which exact gathered input produced a draft."""
     inputs = _load_draft_inputs(date_dir)
     inputs[key] = _input_fingerprint(summary)
-    with _draft_inputs_path(date_dir).open("w") as f:
+    path = _draft_inputs_path(date_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as f:
         json.dump(inputs, f, indent=2)
 
 
 def load_saved_drafts(date_dir: Path) -> dict:
     """Load previously saved drafts from disk, or empty dict."""
     path = _drafts_path(date_dir)
+    if not path.exists():
+        path = _legacy_draft_path(date_dir, "drafts.json")
     if not path.exists():
         return {}
     try:
@@ -405,12 +447,13 @@ async def batch_draft(
     callback=None,
     only_significant: bool = False,
     manifest: Optional[dict] = None,
+    force_redraft: bool = False,
 ) -> tuple:
     """Return drafts, summaries, failed keys, and per-key outcomes.
 
     Outcomes are drafted, quiet_skip, missing_data, draft_failed, or invalid_draft.
     """
-    saved = load_saved_drafts(date_dir)
+    saved = {} if force_redraft else load_saved_drafts(date_dir)
     saved_inputs = _load_draft_inputs(date_dir)
     sem = asyncio.Semaphore(10)
     max_retries = 3

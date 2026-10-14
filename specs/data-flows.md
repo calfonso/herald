@@ -52,10 +52,14 @@ constructs the artifact directory as `<output-dir>/<end-date>`.
 | --- | --- | --- |
 | `<date-dir>/manifest.json` | External gatherer; Herald stamps `gathered_at` and per-issue capture times, then merges single-issue refresh manifests | Gather-cache loader, pipeline issue list, temporal prompt context |
 | `<date-dir>/issues/<key>.json` | External gatherer | Draft pruning, previous-status display, refresh, optional coding agent |
-| `<date-dir>/drafts.json` | Herald | Batch reuse, review edits/revisions |
-| `<date-dir>/draft_inputs.json` | Herald | Confirms that a saved draft matches the exact current pruned evidence input |
+| `<state-dir>/drafts/<output-dir-id>/<date>/drafts.json` | Herald | Batch reuse, review edits/revisions |
+| `<state-dir>/drafts/<output-dir-id>/<date>/draft_inputs.json` | Herald | Confirms that a saved draft matches the exact current pruned evidence input |
 | `<platform-cache>/herald/<cache-key>/cache_meta.json` | Herald | Gather-cache lookup; stores `date_dir` |
 | Temporary draft/prompt Markdown files | Herald | External editor or coding agent; removed after handoff |
+
+On Linux, `<state-dir>` is `$XDG_STATE_HOME/herald` or `~/.local/state/herald`.
+Existing `<date-dir>/drafts.json` and `draft_inputs.json` files are read as a
+legacy fallback; the next save writes them under `<state-dir>`.
 
 For the temporal evidence contract, the manifest supplies `reporting_window`
 with offset-aware `start`, `end_exclusive`, and IANA `timezone`. Its interval is
@@ -85,12 +89,14 @@ There are two separate caches:
    sorted assignees/exclusions, days, and explicit start/end dates. Cache metadata
    must have been written on the current UTC day and point to an existing
    manifest. A hit skips the subprocess. `--refresh` bypasses this lookup.
-2. **Draft reuse:** `drafts.json` maps issue keys to text under the date directory.
-   `draft_inputs.json` stores a SHA-256 fingerprint of the exact pruned JSON
+2. **Draft reuse:** State `drafts.json` maps issue keys to text for each output
+   directory and date. `draft_inputs.json` stores a SHA-256 fingerprint of the exact pruned JSON
    input. Herald reuses a draft only when that fingerprint matches; source,
    reporting-window, gather-time, or evidence changes trigger a new draft.
-   Legacy drafts without an input fingerprint are regenerated. The model and
-   writing-rules configuration are not part of this fingerprint.
+   `--redraft` bypasses draft reuse while leaving gather-cache reuse enabled.
+   Existing drafts in the gathered-data directory are read as a migration
+   fallback and copied into XDG state on the next save. The model and
+   writing-rules configuration are not part of the fingerprint.
 
 Gather cache identity omits Jira instance and output directory. Draft storage
 is scoped by output directory and end date, not by filters or complete range;

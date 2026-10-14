@@ -83,10 +83,13 @@ stage.
    directory, prefixed with its filename heading.
 4. The full contents of `formatting.md` from that directory, similarly headed.
 5. Every configured `[llm].writing_rules` entry, as an additional bullet rule.
-6. An instruction to produce only the `ryg_field` format, with no preamble or
-   explanation and a first line starting with `* Color Status:`. Markdown
+6. An instruction to produce only the `ryg_field_markdown` format for Jira
+   Cloud REST API v3, with no preamble or explanation and a first line starting
+   with `* Color Status:`. Markdown
    top-level bullets must use `* ` and nested bullets `  * `; wiki-style `**`
-   sub-bullets are prohibited because the Jira conversion parses Markdown.
+   sub-bullets are prohibited because the Jira conversion parses Markdown. PR
+   references must be Markdown links labeled `owner/repo#number`, with no raw
+   PR URLs in parentheses.
 
 The directory resolution order is preferences `skills_dir`,
 `HERALD_SKILLS_DIR`, previously fetched platform data, a source-tree-relative
@@ -116,7 +119,7 @@ member, falling back to the whole object when that member is absent.
 | `carry_forward_context.current_status_summary` | `issue.current_status_summary`, converted from ADF to Markdown when possible; missing becomes `""` |
 | `carry_forward_context.last_status_update` | `issue.last_status_summary_update`; absent becomes `""` |
 | `carry_forward_context.descendants` | Current total, rounded completion, and status counts; no activity dates are inferred |
-| `carry_forward_context.pull_requests[]` | Current PR number, title, state, draft flag, merge date, and dates object; these describe state and do not establish an in-window event |
+| `carry_forward_context.pull_requests[]` | Current PR number, repository, URL, title, state, draft flag, merge date, and dates object; these describe state and do not establish an in-window event |
 | `carry_forward_context.older_activity[]` | Dated events outside the reporting interval |
 
 Legacy source comment and changelog buckets are used only when
@@ -163,6 +166,8 @@ contents depend on the external gatherer.
     },
     "pull_requests": [{
       "number": 123,
+      "repository": "openshift/hypershift",
+      "url": "https://github.com/openshift/hypershift/pull/123",
       "title": "Implement regional failover",
       "state": "OPEN",
       "is_draft": false,
@@ -178,8 +183,8 @@ contents depend on the external gatherer.
 
 The payload does not include the full manifest, current date,
 project/component/label filters, issue
-description, explicit delivery targets/dependency fields, PR repository/URL,
-commit messages/diffs, individual review text, or the full
+description, explicit delivery targets/dependency fields, commit messages/diffs,
+individual review text, or the full
 gathered JSON. Some facts or links can still occur inside free-text comments,
 previous status, or carry-forward context; omission of a dedicated field is
 not a guarantee that the information is absent from that text.
@@ -201,11 +206,13 @@ two-second delays. Successful SDK responses update token usage. `_first_text`
 returns the first text block; if none exists it currently falls back to a
 thinking block, otherwise raises. There is no stop-reason/truncation check.
 
-Drafts are saved to `drafts.json`; `draft_inputs.json` stores a SHA-256
-fingerprint of the exact pruned input for each draft. A saved draft is reused
+Drafts are saved under the platform state directory, scoped by output directory
+and report date; `draft_inputs.json` stores a SHA-256 fingerprint of the exact
+pruned input for each draft. A saved draft is reused
 only when its input fingerprint matches the current temporal and evidence
 payload. Pruned summaries are rebuilt for cached drafts so revisions retain
 their evidence context. Legacy drafts without fingerprints are regenerated.
+`--redraft` skips saved drafts while still allowing reuse of gathered data.
 See [cache flows](data-flows.md#caching).
 
 At this baseline there is no output schema validation and unrecognized color

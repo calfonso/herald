@@ -29,6 +29,19 @@ _TEMPORAL_EVIDENCE_RULES = (
     "risks as continuing conditions.\n"
 )
 
+_RYG_MARKDOWN_FORMAT_RULES = (
+    "Produce only the `ryg_field_markdown` output format for Jira Cloud REST API v3. "
+    "No preamble or explanation; output starts with `* Color Status:`. "
+    "Use standard Markdown bullets: top-level bullets are `* ` and nested bullets "
+    "are `  * ` (two spaces, asterisk, space). Never use Jira wiki-style `**` "
+    "sub-bullets. Render every PR reference as a Markdown link labeled "
+    "`owner/repo#number` and linked to the PR URL in the evidence, using the "
+    "provided `repository` and `url` fields. Never output a bare `#number` or "
+    "shorthand `repo#number`, or put a raw PR URL in parentheses. The URL must "
+    "appear only as the Markdown link target. Do not guess a repository or URL "
+    "when the evidence does not provide one."
+)
+
 
 LITELLM_PRICING_URL = (
     "https://raw.githubusercontent.com/BerriAI/litellm/main/"
@@ -143,6 +156,7 @@ async def request_changes_api(
             "You are revising a Jira R/Y/G status update. Output ONLY the revised "
             "status update in the exact same format.\n\n"
             + _TEMPORAL_EVIDENCE_RULES
+            + _RYG_MARKDOWN_FORMAT_RULES
         ),
         messages=[{
             "role": "user",
@@ -182,13 +196,5 @@ def build_system_prompt(prefs: UserPrefs) -> str:
         rules = "\n".join(f"- {rule}" for rule in prefs.writing_rules)
         parts.append(f"## Additional writing rules (user preferences)\n\n{rules}\n")
 
-    parts.append(
-        "Produce only the `ryg_field` format output defined in formatting.md. "
-        "No preamble, no explanation — output starts with `* Color Status:`.\n\n"
-        "CRITICAL FORMATTING RULE: Use standard markdown bullets only. "
-        "Top-level bullets are `* ` and nested bullets are `  * ` (two spaces "
-        "+ asterisk + space). NEVER use wiki-style `**` for sub-bullets — the "
-        "output is parsed as markdown and `**` will be misinterpreted as bold "
-        "markers, corrupting the Jira field."
-    )
+    parts.append(_RYG_MARKDOWN_FORMAT_RULES)
     return "\n".join(parts)

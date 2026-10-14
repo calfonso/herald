@@ -578,6 +578,7 @@ class ReviewScreen(Screen):
             drafts, summaries, failed, outcomes = await batch_draft(
                 self.client, self.model, self.system_prompt, date_dir,
                 manifest["issues"], self.usage, manifest=manifest,
+                force_redraft=True,
             )
             for key in outcomes:
                 self.drafts.pop(key, None)
@@ -819,6 +820,7 @@ class StatusUpdateApp(App):
                 callback=self._make_callback(),
                 only_significant=only_significant,
                 manifest=manifest,
+                force_redraft=getattr(args, "redraft", False),
             )
             quiet = sum(state == "quiet_skip" for state in outcomes.values())
             missing = sum(state == "missing_data" for state in outcomes.values())
