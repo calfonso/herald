@@ -10,6 +10,11 @@ import aiohttp
 import pyadf
 
 
+def issue_browse_url(jira_url: str, issue_key: str) -> str:
+    """Return the Jira web URL for an issue key (opens in a browser)."""
+    return f"{jira_url.rstrip('/')}/browse/{issue_key}"
+
+
 def _text_to_adf(text: str) -> dict:
     """Convert markdown text into an ADF document for Jira Cloud API v3."""
     return pyadf.Document.from_markdown(text).to_adf()
