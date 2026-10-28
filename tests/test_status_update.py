@@ -13,7 +13,12 @@ import pytest
 
 from herald.app import ReviewResult, ReviewScreen, edit_in_editor, extract_color, publish_validated_draft
 from herald.config import (
-    DEFAULT_MAX_TOKENS, UserPrefs, find_scripts_dir, find_skills_dir, load_prefs,
+    DEFAULT_MAX_TOKENS,
+    MAX_CONFIGURED_MAX_TOKENS,
+    UserPrefs,
+    find_scripts_dir,
+    find_skills_dir,
+    load_prefs,
 )
 from herald.gather import (
     _field_to_text,
@@ -32,6 +37,20 @@ from herald.llm import (
     draft_ryg,
     request_changes_api,
 )
+
+
+# ─── fixtures ────────────────────────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def _isolate_draft_state(tmp_path, monkeypatch):
+    """Keep batch_draft's draft cache out of the user's global state dir.
+
+    Draft state is keyed by the gathered output path, and pytest recycles
+    ``pytest-N`` basetemps across sessions, so tests reusing a path could load
+    a stale draft from a previous run and never exercise the code under test.
+    """
+    from herald import gather
+    monkeypatch.setattr(gather, "_get_state_dir", lambda: tmp_path / "state")
 
 
 # ─── build_system_prompt ─────────────────────────────────────────────────────
@@ -120,6 +139,18 @@ def test_call_with_truncation_retry_doubles_cap_and_notifies():
     assert result == "complete draft"
     assert caps == [4096, 8192]
     assert notices == [8192]
+
+
+def test_call_with_truncation_retry_caps_at_configured_max():
+    caps = []
+
+    async def call(max_tokens):
+        caps.append(max_tokens)
+        raise TruncatedResponseError("truncated")
+
+    with pytest.raises(TruncatedResponseError):
+        asyncio.run(call_with_truncation_retry(call, MAX_CONFIGURED_MAX_TOKENS))
+    assert caps == [MAX_CONFIGURED_MAX_TOKENS, MAX_CONFIGURED_MAX_TOKENS]
 
 
 def test_call_with_truncation_retry_propagates_second_truncation():

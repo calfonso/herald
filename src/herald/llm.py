@@ -10,7 +10,9 @@ from typing import Optional
 
 import anthropic
 
-from .config import DEFAULT_MAX_TOKENS, UserPrefs, find_skills_dir
+from .config import (
+    DEFAULT_MAX_TOKENS, MAX_CONFIGURED_MAX_TOKENS, UserPrefs, find_skills_dir,
+)
 
 
 _TEMPORAL_EVIDENCE_RULES = (
@@ -163,7 +165,9 @@ async def call_with_truncation_retry(call, max_tokens: int, on_retry=None) -> st
     try:
         return await call(max_tokens)
     except TruncatedResponseError:
-        retry_max_tokens = max_tokens * TRUNCATION_RETRY_FACTOR
+        retry_max_tokens = min(
+            max_tokens * TRUNCATION_RETRY_FACTOR, MAX_CONFIGURED_MAX_TOKENS
+        )
         if on_retry is not None:
             result = on_retry(retry_max_tokens)
             if inspect.isawaitable(result):

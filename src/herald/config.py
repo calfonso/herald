@@ -23,17 +23,26 @@ _AI_HELPERS_REPO = "https://github.com/openshift-eng/ai-helpers"
 DEFAULT_MAX_TOKENS = 8192
 
 # Sanity bound for configured values; real output limits are provider-specific.
+# TODO: derive the effective ceiling from the selected model (e.g. model
+# metadata/pricing data) instead of a fixed constant.
 MAX_CONFIGURED_MAX_TOKENS = 1_000_000
 
 
 def _coerce_max_tokens(value: object) -> int:
     """Return a positive integer max_tokens, or the default for bad input."""
+    if value is None:
+        return DEFAULT_MAX_TOKENS
     if (
         isinstance(value, int)
         and not isinstance(value, bool)
         and 0 < value <= MAX_CONFIGURED_MAX_TOKENS
     ):
         return value
+    print(
+        f"Warning: invalid [llm].max_tokens={value!r}; "
+        f"falling back to {DEFAULT_MAX_TOKENS}",
+        file=sys.stderr,
+    )
     return DEFAULT_MAX_TOKENS
 
 
