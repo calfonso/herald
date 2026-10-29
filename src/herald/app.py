@@ -10,10 +10,13 @@ from pathlib import Path
 from typing import Optional
 
 import aiohttp
+from rich.style import Style
+from rich.text import Text
 
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.message import Message
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Input, ProgressBar, RichLog, Static
 
@@ -28,7 +31,7 @@ from .gather import (
     save_drafts,
     save_draft_input,
 )
-from .jira import get_jira_auth, update_jira_status
+from .jira import get_jira_auth, issue_browse_url, update_jira_status
 from .llm import (
     TokenUsage,
     build_system_prompt,
@@ -105,6 +108,40 @@ class ScrollPane(RichLog):
     ]
 
 
+class IssueKeyClicked(Message):
+    """Posted by IssueTable when the Jira key cell of a row is clicked."""
+
+    def __init__(self, issue_key: str) -> None:
+        self.issue_key = issue_key
+        super().__init__()
+
+
+class IssueTable(DataTable):
+    """DataTable whose key column opens the issue in a browser when clicked.
+
+    DataTable overrides Widget._on_click, so `@click` span meta never reaches
+    the action system; the click is intercepted here instead.
+    """
+
+    key_column = None  # ColumnKey of the clickable key column, if any.
+
+    async def _on_click(self, event: events.Click) -> None:
+        meta = event.style.meta if event.style is not None else {}
+        await super()._on_click(event)
+        if self.key_column is None:
+            return
+        row_index, column_index = meta.get("row"), meta.get("column")
+        if row_index is None or row_index < 0 or column_index is None or column_index < 0:
+            return
+        try:
+            column = self.ordered_columns[column_index]
+            row = self.ordered_rows[row_index]
+        except IndexError:
+            return
+        if column.key == self.key_column:
+            self.post_message(IssueKeyClicked(row.key.value))
+
+
 class ReviewScreen(Screen):
     """Interactive review: DataTable + new draft pane + previous status pane.
 
@@ -165,6 +202,7 @@ class ReviewScreen(Screen):
         Binding("p", "retry_publish", "Retry publish", show=True),
         Binding("s", "skip", "Skip", show=True),
         Binding("e", "edit", "Edit in $EDITOR", show=True),
+        Binding("o", "open_issue", "Open in browser", show=True),
         Binding("i", "interactive_changes", "Interactive changes", show=True),
         Binding("r", "refresh", "Refresh issue & re-draft", show=True),
         Binding("R", "refresh_all", "Refresh all & re-draft", show=True),
@@ -223,7 +261,7 @@ class ReviewScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield DataTable(id="issue-table")
+        yield IssueTable(id="issue-table")
         yield ScrollPane(id="draft-panel", highlight=True, markup=True, auto_scroll=False)
         yield ScrollPane(id="current-panel", highlight=True, markup=True, auto_scroll=False)
         yield Input(placeholder="Describe the changes you want...", id="request-input")
@@ -232,15 +270,16 @@ class ReviewScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
-        table = self.query_one("#issue-table", DataTable)
+        table = self.query_one("#issue-table", IssueTable)
         table.cursor_type = "row"
         self._col_keys = table.add_columns("Key", "Summary", "Color", "Action")
+        table.key_column = self._col_keys[0]
         for issue in self.issues:
             key = issue["key"]
             draft = self.drafts.get(key, "")
             color = extract_color(draft)
             table.add_row(
-                key,
+                self._key_cell(key),
                 (issue.get("summary") or "")[:60],
                 color,
                 {
@@ -255,6 +294,24 @@ class ReviewScreen(Screen):
             table.move_cursor(row=0)
             self._update_panels()
         self._update_status_bar()
+
+    def _key_cell(self, key: str) -> Text:
+        """Render the key as an underlined hyperlink to the Jira issue page."""
+        return Text(
+            key,
+            style=Style(underline=True, link=issue_browse_url(self.jira_url, key)),
+        )
+
+    def on_issue_key_clicked(self, event: IssueKeyClicked) -> None:
+        self.action_open_issue(event.issue_key)
+
+    def action_open_issue(self, key: Optional[str] = None) -> None:
+        key = key or self._current_key()
+        if not key:
+            return
+        url = issue_browse_url(self.jira_url, key)
+        self.app.open_url(url)
+        self.app.notify(f"Opening {key} in browser", timeout=2)
 
     def on_data_table_row_highlighted(self) -> None:
         self._update_panels()
@@ -339,7 +396,8 @@ class ReviewScreen(Screen):
             f"  {approved + skipped}/{total} reviewed  |  "
             f"{approved} approved  {skipped} skipped  |  "
             f"j/k=nav  /=search  n/N=match  ^w j/k=panes  "
-            f"a=publish  p=retry  s=skip  e=edit  i=revise  r=refresh  R=refresh all  q=quit"
+            f"a=publish  p=retry  s=skip  e=edit  i=revise  r=refresh  R=refresh all  "
+            f"o=open  q=quit"
         )
 
     def _mark_action(self, key: str, label: str) -> None:
