@@ -25,7 +25,7 @@ Environment variables:
   ANTHROPIC_VERTEX_PROJECT_ID  Use Vertex AI instead of direct API
 """,
     )
-    parser.add_argument("--project", required=True, help="Jira project key (e.g. OCPSTRAT)")
+    parser.add_argument("--project", help="Jira project key (e.g. OCPSTRAT); may come from --profile")
     parser.add_argument("--component", help="Filter by component")
     parser.add_argument("--label", help="Filter by label")
     parser.add_argument("--assignee", action="append", help="Filter by assignee email (repeatable)")
@@ -52,16 +52,24 @@ Environment variables:
     return parser
 
 
+def apply_profile(parser: argparse.ArgumentParser, args: argparse.Namespace, prefs) -> None:
+    """Fill unset args from the named profile and require a project."""
+    if args.profile:
+        if args.profile not in prefs.profiles:
+            parser.error(f"profile {args.profile!r} not found in prefs.toml")
+        for key, value in prefs.profiles[args.profile].items():
+            if not getattr(args, key, None):
+                setattr(args, key, value)
+    if not args.project:
+        parser.error("--project is required (or set project in the --profile)")
+
+
 async def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     prefs = load_prefs(args.prefs)
 
-    if args.profile and args.profile in prefs.profiles:
-        profile = prefs.profiles[args.profile]
-        for key, value in profile.items():
-            if not getattr(args, key, None):
-                setattr(args, key, value)
+    apply_profile(parser, args, prefs)
 
     scripts_dir = find_scripts_dir(prefs)
     app = StatusUpdateApp(args, prefs, scripts_dir)

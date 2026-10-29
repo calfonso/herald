@@ -1182,3 +1182,44 @@ def test_profile_does_not_override_explicitly_set_args():
     assert args.component == "My Component"
     assert args.label == "my-label"
     assert args.model == "claude-haiku-4-5"  # profile fills model (was None)
+
+
+def test_apply_profile_supplies_project():
+    from herald.cli import apply_profile, build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(["--profile", "p"])
+    prefs = UserPrefs(profiles={"p": {"project": "OCPSTRAT", "assignee": ["me@example.com"]}})
+
+    apply_profile(parser, args, prefs)
+
+    assert args.project == "OCPSTRAT"
+    assert args.assignee == ["me@example.com"]
+
+
+def test_apply_profile_cli_project_wins():
+    from herald.cli import apply_profile, build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(["--project", "HPSTRAT", "--profile", "p"])
+    apply_profile(parser, args, UserPrefs(profiles={"p": {"project": "OCPSTRAT"}}))
+
+    assert args.project == "HPSTRAT"
+
+
+def test_apply_profile_errors_without_project():
+    from herald.cli import apply_profile, build_parser
+
+    parser = build_parser()
+    args = parser.parse_args([])
+    with pytest.raises(SystemExit):
+        apply_profile(parser, args, UserPrefs())
+
+
+def test_apply_profile_errors_on_unknown_profile():
+    from herald.cli import apply_profile, build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(["--project", "X", "--profile", "typo"])
+    with pytest.raises(SystemExit):
+        apply_profile(parser, args, UserPrefs())
