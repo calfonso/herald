@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 from pathlib import Path
+from typing import Optional
 
 from .app import StatusUpdateApp
 from .config import find_scripts_dir, load_prefs
@@ -52,25 +53,56 @@ Environment variables:
     return parser
 
 
-def apply_profile(parser: argparse.ArgumentParser, args: argparse.Namespace, prefs) -> None:
-    """Fill unset args from the named profile and require a project."""
+def _explicit_args(argv: Optional[list[str]]) -> set[str]:
+    """Names of the options actually passed on the command line.
+
+    argparse can't tell "not passed" from "passed with the default value", so
+    parse once more with every default suppressed and see what was set.
+    """
+    parser = build_parser()
+    for action in parser._actions:
+        action.default = argparse.SUPPRESS
+    return set(vars(parser.parse_args(argv)))
+
+
+def apply_profile(
+    parser: argparse.ArgumentParser, args: argparse.Namespace, prefs, explicit: set[str],
+) -> None:
+    """Fill args the user didn't pass from the named profile, and require a project.
+
+    Profile keys are option names with `-` or `_` (`start-date`, `start_date`).
+    An unknown key is an error, since it would otherwise be silently ignored.
+    """
     if args.profile:
         if args.profile not in prefs.profiles:
             parser.error(f"profile {args.profile!r} not found in prefs.toml")
-        for key, value in prefs.profiles[args.profile].items():
-            if not getattr(args, key, None):
+        known = {action.dest for action in parser._actions if action.dest != "help"}
+        profile = {key.replace("-", "_"): value for key, value in prefs.profiles[args.profile].items()}
+        unknown = sorted(set(profile) - known)
+        if unknown:
+            parser.error(
+                f"profile {args.profile!r} has unknown option(s): {', '.join(unknown)} "
+                f"(valid: {', '.join(sorted(known - {'profile', 'prefs'}))})"
+            )
+        for key, value in profile.items():
+            if key not in explicit:
                 setattr(args, key, value)
     if not args.project:
         parser.error("--project is required (or set project in the --profile)")
 
 
-async def main() -> None:
+def resolve_args(argv: Optional[list[str]] = None, prefs=None):
+    """Parse the command line and apply the selected profile. Returns (args, prefs)."""
     parser = build_parser()
-    args = parser.parse_args()
-    prefs = load_prefs(args.prefs)
+    args = parser.parse_args(argv)
+    if prefs is None:
+        prefs = load_prefs(args.prefs)
+    apply_profile(parser, args, prefs, _explicit_args(argv))
+    return args, prefs
 
-    apply_profile(parser, args, prefs)
 
+async def main() -> None:
+    args, prefs = resolve_args()
     scripts_dir = find_scripts_dir(prefs)
     app = StatusUpdateApp(args, prefs, scripts_dir)
     await app.run_async()
